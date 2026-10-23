@@ -1,0 +1,45 @@
+package com.youlai.boot.system.service;
+
+import com.baomidou.mybatisplus.extension.service.IService;
+import com.youlai.boot.system.model.entity.TenantMenu;
+
+import java.util.List;
+
+/**
+ * 租户菜单业务接口
+ *
+ * @author Ray.Hao
+ * @since 3.0.0
+ */
+public interface TenantMenuService extends IService<TenantMenu> {
+
+    /**
+     * 获取租户可用菜单ID集合
+     *
+     * @param tenantId 租户ID
+     * @return 菜单ID集合
+     */
+    List<Long> listMenuIdsByTenant(Long tenantId);
+
+    /**
+     * 保存租户菜单配置
+     *
+     * @param tenantId 租户ID
+     * @param menuIds 菜单ID集合
+     */
+    void saveTenantMenus(Long tenantId, List<Long> menuIds);
+
+    /**
+     * 新增租户菜单时，将菜单关联到所有租户
+     *
+     * @param menuId 菜单ID
+     */
+    void addMenuToAllTenants(Long menuId);
+
+    /**
+     * 删除菜单时，清理所有租户与这些菜单的关联
+     *
+     * @param menuIds 菜单ID集合（含被级联删除的子菜单）
+     */
+    void removeByMenuIds(List<Long> menuIds);
+}

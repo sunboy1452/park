@@ -1,0 +1,11 @@
+{
+  // 模板类型检查专用配置：开启 strictTemplates 后 @wot-ui/ui 内部 SFC 会报错，
+  // 因此该配置只用于 scripts/check-templates.mjs，脚本只统计 src 下的错误
+  "extends": "./tsconfig.json",
+  "vueCompilerOptions": {
+    "plugins": ["@uni-helper/uni-types/volar-plugin"],
+    "nativeTags": ["block", "component", "template", "slot"],
+    "strictTemplates": true,
+    "skipTemplateCodegen": false
+  }
+}

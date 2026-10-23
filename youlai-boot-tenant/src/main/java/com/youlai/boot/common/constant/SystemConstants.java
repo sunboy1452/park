@@ -1,0 +1,40 @@
+package com.youlai.boot.common.constant;
+
+/**
+ * 系统常量
+ *
+ * @author Ray.Hao
+ * @since 1.0.0
+ */
+public interface SystemConstants {
+
+    // 根节点ID
+    Long ROOT_NODE_ID = 0L;
+
+    Long DEFAULT_TENANT_ID = 0L;
+
+    // 平台租户ID，固定为 0，即默认租户
+    Long PLATFORM_TENANT_ID = DEFAULT_TENANT_ID;
+
+    Long PLATFORM_MENU_ID = 1L;
+
+    String PLATFORM_ADMIN_USERNAME = "admin";
+
+    String PLATFORM_ROOT_USERNAME = "root";
+
+    String PLATFORM_ADMIN_ROLE_CODE = "ADMIN";
+
+    // 租户切换权限标识
+    String TENANT_SWITCH_PERMISSION = "sys:tenant:switch";
+
+    // 系统默认密码
+    String DEFAULT_PASSWORD = "123456";
+
+    // 超级管理员角色编码
+    String ROOT_ROLE_CODE = "ROOT";
+
+
+
+
+
+}

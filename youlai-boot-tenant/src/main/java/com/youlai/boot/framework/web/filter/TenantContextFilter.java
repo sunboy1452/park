@@ -1,0 +1,97 @@
+package com.youlai.boot.framework.web.filter;
+
+import com.youlai.boot.common.constant.SecurityConstants;
+import com.youlai.boot.framework.tenant.TenantContextHolder;
+import com.youlai.boot.framework.tenant.TenantDomainResolver;
+import com.youlai.boot.framework.security.model.SecurityUserDetails;
+import com.youlai.boot.framework.security.token.TokenManager;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.annotation.Order;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+/**
+ * 租户上下文过滤器
+ *
+ * @author Ray.Hao
+ * @since 3.0.0
+ */
+@Slf4j
+@Component
+@Order(1)
+@RequiredArgsConstructor
+public class TenantContextFilter extends OncePerRequestFilter {
+
+    private final TokenManager tokenManager;
+    private final TenantDomainResolver tenantDomainResolver;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
+
+        try {
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+
+            Long tenantIdFromAuth = resolveTenantFromAuthentication(authentication);
+
+            Authentication authenticationFromToken = null;
+            if (tenantIdFromAuth == null) {
+                authenticationFromToken = resolveAuthenticationFromToken(request);
+                tenantIdFromAuth = resolveTenantFromAuthentication(authenticationFromToken);
+            }
+
+            Long tenantId = tenantIdFromAuth;
+
+            if (tenantId == null) {
+                String domain = request != null ? request.getServerName() : null;
+                if (StringUtils.hasText(domain)) {
+                    tenantId = tenantDomainResolver.getTenantIdByDomain(domain);
+                }
+            }
+
+            if (tenantId != null) {
+                TenantContextHolder.setTenantId(tenantId);
+                log.debug("TenantContextFilter set tenantId: {}", tenantId);
+            }
+
+            filterChain.doFilter(request, response);
+        } finally {
+            TenantContextHolder.clear();
+        }
+    }
+
+    private Long resolveTenantFromAuthentication(Authentication authentication) {
+        if (authentication == null) {
+            return null;
+        }
+        Object principal = authentication.getPrincipal();
+        if (principal instanceof SecurityUserDetails details) {
+            return details.getTenantId();
+        }
+        return null;
+    }
+
+    private Authentication resolveAuthenticationFromToken(HttpServletRequest request) {
+        String authHeader = request.getHeader("Authorization");
+        if (!StringUtils.hasText(authHeader) || !authHeader.startsWith(SecurityConstants.BEARER_TOKEN_PREFIX)) {
+            return null;
+        }
+        String token = authHeader.substring(SecurityConstants.BEARER_TOKEN_PREFIX.length());
+        try {
+            return tokenManager.parseToken(token);
+        } catch (Exception e) {
+            log.warn("TenantContextFilter parseToken failed: {}", e.getMessage());
+            return null;
+        }
+    }
+}

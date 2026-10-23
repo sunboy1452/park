@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "node",
+    "target": "esnext",
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "lib": ["esnext", "dom"],
+    "types": ["@dcloudio/types", "@uni-helper/uni-types"]
+  },
+  "vueCompilerOptions": {
+    // 调整 Volar（Vue 语言服务工具）解析行为，用于为 uni-app 组件提供 TypeScript 类型
+    "plugins": ["@uni-helper/uni-types/volar-plugin"],
+    // 禁用原生组件严格类型检查（uni-app 原生组件与 Volar 的兼容性问题）
+    "nativeTags": ["block", "component", "template", "slot"],
+    // 模板类型检查在 vue-tsc 默认工程里关闭：@wot-ui/ui 内部 SFC 模板（canvas id / inputmode
+    // 等原生属性写法）在严格模板模式下报错，工程无法只针对自有文件开启。
+    // 自有文件的模板检查走 tsconfig.templates.json + scripts/check-templates.mjs。
+    "strictTemplates": false,
+    "skipTemplateCodegen": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"],
+  "exclude": ["node_modules", "dist"]
+}

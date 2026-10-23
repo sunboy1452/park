@@ -1,0 +1,6 @@
+spring:
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    url: jdbc:mysql://${MYSQL_HOST:101.34.52.78}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:youlai_admin_tenant}?zeroDateTimeBehavior=convertToNull&useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&autoReconnect=true&allowMultiQueries=true
+    username: ${MYSQL_USERNAME:youlai_app}
+    password: ${MYSQL_PASSWORD}

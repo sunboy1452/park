@@ -1,0 +1,759 @@
+package com.youlai.boot.system.service.impl;
+
+import cn.hutool.core.collection.CollectionUtil;
+import cn.hutool.core.lang.Assert;
+import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.StrUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.youlai.boot.framework.security.util.SecurityUtils;
+import com.youlai.boot.system.converter.MenuConverter;
+import com.youlai.boot.system.mapper.MenuMapper;
+import com.youlai.boot.support.ai.AiChatService;
+import com.youlai.boot.support.ai.PromptLoader;
+import com.youlai.boot.system.model.dto.MenuCreateDTO;
+import com.youlai.boot.system.model.entity.Menu;
+import com.youlai.boot.system.model.entity.Tenant;
+import com.youlai.boot.system.model.form.MenuAiFillForm;
+import com.youlai.boot.system.model.form.MenuForm;
+import com.youlai.boot.system.model.query.MenuQuery;
+import com.youlai.boot.system.model.vo.MenuAiVO;
+import com.youlai.boot.system.model.vo.MenuVO;
+import com.youlai.boot.system.model.vo.RouteVO;
+import com.youlai.boot.common.base.IBaseEnum;
+import com.youlai.boot.common.constant.SystemConstants;
+import com.youlai.boot.common.exception.BusinessException;
+import com.youlai.boot.framework.tenant.TenantContextHolder;
+import com.youlai.boot.system.enums.MenuTypeEnum;
+import com.youlai.boot.common.enums.StatusEnum;
+import com.youlai.boot.common.model.KeyValue;
+import com.youlai.boot.common.model.Option;
+import com.youlai.boot.system.service.MenuService;
+import com.youlai.boot.system.service.RoleMenuService;
+import com.youlai.boot.system.service.TenantMenuService;
+import com.youlai.boot.system.service.TenantPlanMenuService;
+import com.youlai.boot.system.service.TenantService;
+import com.youlai.boot.system.enums.MenuScopeEnum;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * 菜单服务实现类
+ *
+ * @author Ray.Hao
+ * @since 2020/11/06
+ */
+@Service
+@RequiredArgsConstructor
+public class MenuServiceImpl extends ServiceImpl<MenuMapper, Menu> implements MenuService {
+
+    // 系统提示词名称，对应 resources/prompts 下的相对路径
+    private static final String SYSTEM_PROMPT_PATH = "menu/system.md";
+
+    private final AiChatService aiChatService;
+    private final PromptLoader promptLoader;
+    private final MenuConverter menuConverter;
+
+    private final RoleMenuService roleMenuService;
+
+    private final TenantMenuService tenantMenuService;
+
+    private final TenantPlanMenuService tenantPlanMenuService;
+
+    private final TenantService tenantService;
+
+
+    /**
+     * 菜单列表
+     *
+     * @param queryParams {@link MenuQuery}
+     */
+    @Override
+    public List<MenuVO> listMenus(MenuQuery queryParams) {
+        List<Menu> menus = this.list(new LambdaQueryWrapper<Menu>()
+                .like(StrUtil.isNotBlank(queryParams.getKeywords()), Menu::getName, queryParams.getKeywords())
+                .orderByAsc(Menu::getSort)
+        );
+        // 获取所有菜单ID
+        Set<Long> menuIds = menus.stream()
+                .map(Menu::getId)
+                .collect(Collectors.toSet());
+
+        // 获取所有父级ID
+        Set<Long> parentIds = menus.stream()
+                .map(Menu::getParentId)
+                .collect(Collectors.toSet());
+
+        // 获取根节点ID（递归的起点），即父节点ID中不包含在部门ID中的节点，注意这里不能拿顶级菜单 O 作为根节点，因为菜单筛选的时候 O 会被过滤掉
+        List<Long> rootIds = parentIds.stream()
+                .filter(id -> !menuIds.contains(id))
+                .toList();
+
+        // 使用递归函数来构建菜单树
+        return rootIds.stream()
+                .flatMap(rootId -> buildMenuTree(rootId, menus).stream())
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 递归生成菜单列表
+     *
+     * @param parentId 父级ID
+     * @param menuList 菜单列表
+     * @return 菜单列表
+     */
+    private List<MenuVO> buildMenuTree(Long parentId, List<Menu> menuList) {
+        return CollectionUtil.emptyIfNull(menuList)
+                .stream()
+                .filter(menu -> menu.getParentId().equals(parentId))
+                .map(entity -> {
+                    MenuVO menuVO = menuConverter.toVo(entity);
+                    List<MenuVO> children = buildMenuTree(entity.getId(), menuList);
+                    menuVO.setChildren(children);
+                    return menuVO;
+                }).toList();
+    }
+
+    /**
+     * 菜单下拉数据
+     *
+     * @param types 菜单类型，为空查全部
+     * @param scope 菜单范围(1=平台 2=租户)
+     */
+    @Override
+    public List<Option<Long>> listMenuOptions(List<String> types, Integer scope) {
+        Long tenantId = TenantContextHolder.getTenantId();
+        List<Long> tenantMenuIds = Collections.emptyList();
+        if (tenantId != null && !SystemConstants.PLATFORM_TENANT_ID.equals(tenantId)) {
+            tenantMenuIds = tenantMenuService.listMenuIdsByTenant(tenantId);
+            if (CollectionUtil.isEmpty(tenantMenuIds)) {
+                return Collections.emptyList();
+            }
+        }
+
+        List<Menu> menuList = this.list(new LambdaQueryWrapper<Menu>()
+                .in(CollectionUtil.isNotEmpty(tenantMenuIds), Menu::getId, tenantMenuIds)
+                .eq(scope != null, Menu::getScope, scope)
+                .in(CollectionUtil.isNotEmpty(types), Menu::getType, types)
+                .orderByAsc(Menu::getSort)
+        );
+        return buildMenuOptions(SystemConstants.ROOT_NODE_ID, menuList);
+    }
+
+    /**
+     * 递归生成菜单下拉层级列表
+     *
+     * @param parentId 父级ID
+     * @param menuList 菜单列表
+     * @return 菜单下拉列表
+     */
+    private List<Option<Long>> buildMenuOptions(Long parentId, List<Menu> menuList) {
+        List<Option<Long>> menuOptions = new ArrayList<>();
+
+        for (Menu menu : menuList) {
+            if (menu.getParentId().equals(parentId)) {
+                Option<Long> option = new Option<>(menu.getId(), menu.getName());
+                List<Option<Long>> subMenuOptions = buildMenuOptions(menu.getId(), menuList);
+                if (!subMenuOptions.isEmpty()) {
+                    option.setChildren(subMenuOptions);
+                }
+                menuOptions.add(option);
+            }
+        }
+
+        return menuOptions;
+    }
+
+    /**
+     * 获取当前用户的菜单路由列表
+     */
+    @Override
+    public List<RouteVO> listCurrentUserRoutes() {
+        Set<String> roleCodes = SecurityUtils.getRoles();
+
+        if (CollectionUtil.isEmpty(roleCodes)) {
+            return Collections.emptyList();
+        }
+
+        Long originalTenantId = TenantContextHolder.getTenantId();
+        boolean originalIgnoreTenant = TenantContextHolder.isIgnoreTenant();
+        boolean canSwitchTenant = SecurityUtils.canSwitchTenant();
+
+        if (originalTenantId == null) {
+            return Collections.emptyList();
+        }
+
+        Long roleTenantId = canSwitchTenant ? SystemConstants.PLATFORM_TENANT_ID : originalTenantId;
+        Long targetTenantId = originalTenantId;
+
+        List<Menu> menuList;
+        try {
+            // 使用手动 tenant_id 过滤，避免租户上下文影响联合查询
+            TenantContextHolder.setIgnoreTenant(true);
+            Set<Long> planMenuIdSet = Collections.emptySet();
+            if (!SystemConstants.PLATFORM_TENANT_ID.equals(targetTenantId)) {
+                planMenuIdSet = resolveTenantPlanMenuIdSet(targetTenantId);
+                if (CollectionUtil.isEmpty(planMenuIdSet)) {
+                    return Collections.emptyList();
+                }
+            }
+
+            if (SecurityUtils.isRoot()) {
+                if (SystemConstants.PLATFORM_TENANT_ID.equals(targetTenantId)) {
+                    menuList = this.list(new LambdaQueryWrapper<Menu>()
+                            .ne(Menu::getType, MenuTypeEnum.BUTTON.getValue())
+                            .orderByAsc(Menu::getSort)
+                    );
+                } else {
+                    List<Long> tenantMenuIds = tenantMenuService.listMenuIdsByTenant(targetTenantId);
+                    if (CollectionUtil.isEmpty(tenantMenuIds)) {
+                        return Collections.emptyList();
+                    }
+                    menuList = this.list(new LambdaQueryWrapper<Menu>()
+                            .in(Menu::getId, tenantMenuIds)
+                            .eq(Menu::getScope, MenuScopeEnum.TENANT.getValue())
+                            .ne(Menu::getType, MenuTypeEnum.BUTTON.getValue())
+                            .orderByAsc(Menu::getSort)
+                    );
+                }
+            } else {
+                menuList = this.baseMapper.getMenusByRoleCodesAndTenant(roleCodes, roleTenantId, targetTenantId);
+            }
+
+            if (!planMenuIdSet.isEmpty()) {
+                Set<Long> allowedMenuIds = planMenuIdSet;
+                menuList = menuList.stream()
+                        .filter(menu -> allowedMenuIds.contains(menu.getId()))
+                        .collect(Collectors.toList());
+            }
+            return buildRoutes(SystemConstants.ROOT_NODE_ID, menuList);
+        } finally {
+            TenantContextHolder.setIgnoreTenant(originalIgnoreTenant);
+        }
+    }
+
+    /**
+     * 获取租户套餐允许的菜单ID集合
+     *
+     * @param tenantId 租户ID
+     * @return 菜单ID集合
+     */
+    private Set<Long> resolveTenantPlanMenuIdSet(Long tenantId) {
+        Long oldTenantId = TenantContextHolder.getTenantId();
+        boolean oldIgnoreTenant = TenantContextHolder.isIgnoreTenant();
+
+        try {
+            TenantContextHolder.setIgnoreTenant(true);
+            Tenant tenant = tenantService.getOne(new LambdaQueryWrapper<Tenant>()
+                    .select(Tenant::getPlanId)
+                    .eq(Tenant::getId, tenantId));
+            Long planId = tenant == null ? null : tenant.getPlanId();
+            if (planId == null) {
+                return Collections.emptySet();
+            }
+            List<Long> planMenuIds = tenantPlanMenuService.listMenuIdsByPlan(planId);
+            if (CollectionUtil.isNotEmpty(planMenuIds)) {
+                return new HashSet<>(planMenuIds);
+            }
+
+            List<Long> fallbackMenuIds = this.list(new LambdaQueryWrapper<Menu>()
+                            .select(Menu::getId)
+                            .eq(Menu::getScope, MenuScopeEnum.TENANT.getValue()))
+                    .stream()
+                    .map(Menu::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+            return new HashSet<>(fallbackMenuIds);
+        } finally {
+            TenantContextHolder.setIgnoreTenant(oldIgnoreTenant);
+            if (oldTenantId != null) {
+                TenantContextHolder.setTenantId(oldTenantId);
+            }
+        }
+    }
+
+    /**
+     * 递归生成菜单路由层级列表
+     *
+     * @param parentId 父级ID
+     * @param menuList 菜单列表
+     * @return 路由层级列表
+     */
+    private List<RouteVO> buildRoutes(Long parentId, List<Menu> menuList) {
+        List<RouteVO> routeList = new ArrayList<>();
+
+        for (Menu menu : menuList) {
+            if (menu.getParentId().equals(parentId)) {
+                RouteVO routeVO = toRouteVO(menu);
+                List<RouteVO> children = buildRoutes(menu.getId(), menuList);
+                if (!children.isEmpty()) {
+                    routeVO.setChildren(children);
+                }
+                routeList.add(routeVO);
+            }
+        }
+
+        return routeList;
+    }
+
+    /**
+     * 根据RouteBO创建RouteVO
+     */
+    private RouteVO toRouteVO(Menu menu) {
+        RouteVO routeVO = new RouteVO();
+        String routePath = menu.getRoutePath();
+        String externalUrl = menu.getExternalUrl();
+
+        // 外链(type=E)：component 为空是新标签页，component=iframe 是系统内嵌
+        boolean isExternal = MenuTypeEnum.EXTERNAL.getValue().equals(menu.getType());
+        boolean isEmbedded = isExternal && "iframe".equals(menu.getComponent());
+
+        // 新标签页：path 用外链地址；内嵌：path 用内部路由路径
+        String path = isExternal && !isEmbedded && StrUtil.isNotBlank(externalUrl)
+                ? externalUrl
+                : routePath;
+        routeVO.setPath(path);
+
+        // 路由名称：外链不设 name（前端 filterRoutes 会过滤出路由注册表）
+        String routeName = menu.getRouteName();
+        if (StrUtil.isBlank(routeName) && !isExternal) {
+            routeName = StringUtils.capitalize(StrUtil.toCamelCase(path, '-'));
+        }
+        routeVO.setName(routeName);
+
+        routeVO.setRedirect(menu.getRedirect());
+
+        if (isEmbedded) {
+            routeVO.setComponent("iframe");
+        } else if (isExternal) {
+            routeVO.setComponent(null);
+        } else {
+            routeVO.setComponent(menu.getComponent());
+        }
+
+        RouteVO.Meta meta = new RouteVO.Meta();
+        meta.setTitle(menu.getName());
+        meta.setIcon(menu.getIcon());
+        meta.setHidden(StatusEnum.DISABLE.getValue().equals(menu.getVisible()));
+        // 【菜单/内嵌外链】是否开启页面缓存
+        if ((MenuTypeEnum.MENU.getValue().equals(menu.getType()) || isEmbedded)
+                && ObjectUtil.equals(menu.getKeepAlive(), 1)) {
+            meta.setKeepAlive(true);
+        }
+
+        // 外链地址透传前端：新标签页按站内外链打开，内嵌模式供 iframe 页取址
+        if (isExternal && StrUtil.isNotBlank(externalUrl)) {
+            meta.setExternalUrl(externalUrl);
+        }
+
+        Map<String, Object> paramsMap = menu.getParams();
+        if (paramsMap != null && !paramsMap.isEmpty()) {
+            Map<String, String> paramMap = paramsMap.entrySet().stream()
+                    .collect(Collectors.toMap(Map.Entry::getKey, e -> String.valueOf(e.getValue())));
+            meta.setParams(paramMap);
+        }
+        routeVO.setMeta(meta);
+        return routeVO;
+    }
+
+    /**
+     * 新增/修改菜单
+     */
+    @Override
+    @CacheEvict(cacheNames = "menu", key = "'routes'")
+    public boolean saveMenu(MenuForm menuForm) {
+
+        String menuType = menuForm.getType();
+        boolean isExternal = MenuTypeEnum.EXTERNAL.getValue().equals(menuType);
+        boolean isEmbedded = isExternal && "iframe".equals(menuForm.getComponent());
+
+        if (MenuTypeEnum.CATALOG.getValue().equals(menuType)) {  // 如果是目录
+            String path = menuForm.getRoutePath();
+            if (menuForm.getParentId() == 0 && !path.startsWith("/")) {
+                menuForm.setRoutePath("/" + path); // 一级目录需以 / 开头
+            }
+            menuForm.setComponent("Layout");
+        } else if (isExternal && !isEmbedded) {
+            // 外链新标签页：component 留空
+            menuForm.setComponent(null);
+        }
+        if (Objects.equals(menuForm.getParentId(), menuForm.getId())) {
+            throw new BusinessException("父级菜单不能为当前菜单");
+        }
+        validateMenuParent(menuForm);
+        if (MenuTypeEnum.BUTTON.getValue().equals(menuType)) {
+            // 按钮菜单继承父级范围，避免跨平台/业务菜单混用
+            Long parentId = menuForm.getParentId();
+            if (parentId != null) {
+                Menu parent = this.getById(parentId);
+                if (parent != null) {
+                    menuForm.setScope(parent.getScope());
+                }
+            }
+            if (menuForm.getScope() == null) {
+                menuForm.setScope(MenuScopeEnum.TENANT.getValue());
+            }
+        }
+
+        Menu entity = menuConverter.toEntity(menuForm);
+        String treePath = generateMenuTreePath(menuForm.getParentId());
+        entity.setTreePath(treePath);
+
+        // 新增菜单未指定排序时排到同级末尾
+        if (menuForm.getId() == null && entity.getSort() == null) {
+            entity.setSort(resolveNextSort(menuForm.getParentId()));
+        }
+
+        List<KeyValue> params = menuForm.getParams();
+        if (CollectionUtil.isNotEmpty(params)) {
+            entity.setParams(params.stream()
+                    .collect(Collectors.toMap(KeyValue::getKey, KeyValue::getValue)));
+        } else {
+            entity.setParams(null);
+        }
+        // 菜单(M)和内嵌外链(E+iframe)需要路由名称唯一
+        boolean needsRouteName = MenuTypeEnum.MENU.getValue().equals(menuType) || isEmbedded;
+        if (needsRouteName) {
+            Assert.isFalse(this.exists(new LambdaQueryWrapper<Menu>()
+                    .eq(Menu::getRouteName, entity.getRouteName())
+                    .ne(menuForm.getId() != null, Menu::getId, menuForm.getId())
+            ), "路由名称已存在");
+        } else {
+            // 其他类型时 给路由名称赋值为空
+            entity.setRouteName(null);
+        }
+
+        boolean result = this.saveOrUpdate(entity);
+        if (result) {
+            // 仅编辑按钮(B)菜单时才刷新权限缓存（目录/菜单/外链不影响按钮权限）
+            if (menuForm.getId() != null && MenuTypeEnum.BUTTON.getValue().equals(menuForm.getType())) {
+                roleMenuService.refreshRolePermsCache();
+            } else if (menuForm.getId() == null) {
+                // 新增页面菜单时按需生成增删改查按钮
+                if (Boolean.TRUE.equals(menuForm.getGenerateCrudButtons())
+                        && StrUtil.isNotBlank(menuForm.getButtonPermPrefix())) {
+                    saveCrudButtons(entity.getId(), menuForm.getButtonPermPrefix().trim(), treePath, entity.getScope());
+                }
+                // 新增业务菜单时，自动关联到所有租户
+                if (MenuScopeEnum.TENANT.getValue().equals(entity.getScope())) {
+                    tenantMenuService.addMenuToAllTenants(entity.getId());
+                }
+            }
+        }
+        // 修改菜单如果有子菜单，则更新子菜单的树路径
+        updateChildrenTreePath(entity.getId(), treePath);
+        return result;
+    }
+
+    /**
+     * 更新子菜单树路径
+     *
+     * @param id       当前菜单ID
+     * @param treePath 当前菜单树路径
+     */
+    private void updateChildrenTreePath(Long id, String treePath) {
+        List<Menu> children = this.list(new LambdaQueryWrapper<Menu>().eq(Menu::getParentId, id));
+        if (CollectionUtil.isNotEmpty(children)) {
+            // 子菜单的树路径等于父菜单的树路径加上父菜单ID
+            String childTreePath = treePath + "," + id;
+            this.update(new LambdaUpdateWrapper<Menu>()
+                    .eq(Menu::getParentId, id)
+                    .set(Menu::getTreePath, childTreePath)
+            );
+            for (Menu child : children) {
+                // 递归更新子菜单
+                updateChildrenTreePath(child.getId(), childTreePath);
+            }
+        }
+    }
+
+    /**
+     * 部门路径生成
+     *
+     * @param parentId 父ID
+     * @return 父节点路径以英文逗号(, )分割，eg: 1,2,3
+     */
+    private String generateMenuTreePath(Long parentId) {
+        if (SystemConstants.ROOT_NODE_ID.equals(parentId)) {
+            return String.valueOf(parentId);
+        } else {
+            Menu parent = this.getById(parentId);
+            return parent != null ? parent.getTreePath() + "," + parent.getId() : null;
+        }
+    }
+
+    /**
+     * 同级菜单的最大排序 + 1
+     *
+     * @param parentId 父菜单ID
+     * @return 下一个排序值
+     */
+    private int resolveNextSort(Long parentId) {
+        Menu maxSortMenu = this.getOne(new LambdaQueryWrapper<Menu>()
+                .eq(Menu::getParentId, parentId)
+                .orderByDesc(Menu::getSort)
+                .last("LIMIT 1")
+        );
+        return maxSortMenu == null || maxSortMenu.getSort() == null ? 1 : maxSortMenu.getSort() + 1;
+    }
+
+    /**
+     * 校验上级菜单层级：按钮只能挂在菜单下，其他类型只能挂在顶级或目录下
+     *
+     * @param menuForm 菜单表单
+     */
+    private void validateMenuParent(MenuForm menuForm) {
+        // 父级没变时跳过校验，让历史遗留的非法层级仍可编辑其他字段
+        if (menuForm.getId() != null) {
+            Menu current = this.getById(menuForm.getId());
+            if (current != null && Objects.equals(current.getParentId(), menuForm.getParentId())) {
+                return;
+            }
+        }
+
+        boolean isButton = MenuTypeEnum.BUTTON.getValue().equals(menuForm.getType());
+        Long parentId = menuForm.getParentId();
+        if (parentId == null || SystemConstants.ROOT_NODE_ID.equals(parentId)) {
+            Assert.isFalse(isButton, "按钮权限只能挂在菜单下");
+            return;
+        }
+
+        Menu parent = this.getById(parentId);
+        Assert.notNull(parent, "上级菜单不存在");
+        if (isButton) {
+            Assert.isTrue(MenuTypeEnum.MENU.getValue().equals(parent.getType()), "按钮权限只能挂在菜单下");
+        } else {
+            Assert.isFalse(MenuTypeEnum.MENU.getValue().equals(parent.getType()), "菜单下只能挂按钮权限");
+        }
+    }
+
+    /**
+     * 生成增删改查按钮权限
+     *
+     * @param menuId       所属菜单ID
+     * @param permPrefix   权限标识前缀，不含末尾冒号，如 sys:user
+     * @param menuTreePath 所属菜单的树路径
+     * @param scope        所属菜单的范围，按钮沿用该范围
+     */
+    private void saveCrudButtons(Long menuId, String permPrefix, String menuTreePath, Integer scope) {
+        String[] names = {"查询", "新增", "修改", "删除"};
+        String[] actions = {"list", "create", "update", "delete"};
+        // 树路径记录祖先链，删除菜单时据此级联
+        String buttonTreePath = menuTreePath + "," + menuId;
+
+        for (int i = 0; i < names.length; i++) {
+            Menu button = new Menu();
+            button.setParentId(menuId);
+            button.setType(MenuTypeEnum.BUTTON.getValue());
+            button.setName(names[i]);
+            button.setPerm(permPrefix + ":" + actions[i]);
+            button.setSort(i + 1);
+            button.setVisible(1);
+            button.setScope(scope);
+            button.setTreePath(buttonTreePath);
+            this.save(button);
+            // 业务菜单的按钮同步开放给所有租户
+            if (MenuScopeEnum.TENANT.getValue().equals(scope)) {
+                tenantMenuService.addMenuToAllTenants(button.getId());
+            }
+        }
+    }
+
+
+    /**
+     * 修改菜单显示状态
+     *
+     * @param menuId  菜单ID
+     * @param visible 是否显示(1->显示；2->隐藏)
+     * @return 是否修改成功
+     */
+    @Override
+    @CacheEvict(cacheNames = "menu", key = "'routes'")
+    public boolean updateMenuVisible(Long menuId, Integer visible) {
+        return this.update(new LambdaUpdateWrapper<Menu>()
+                .eq(Menu::getId, menuId)
+                .set(Menu::getVisible, visible)
+        );
+    }
+
+    /**
+     * 获取菜单表单数据
+     *
+     * @param id 菜单ID
+     * @return 菜单表单数据
+     */
+    @Override
+    public MenuForm getMenuForm(Long id) {
+        Menu entity = this.getById(id);
+        Assert.isTrue(entity != null, "菜单不存在");
+        MenuForm formData = menuConverter.toForm(entity);
+        // 路由参数 Map 转换为 [{key:"id", value:"1"}, {key:"name", value:"张三"}]
+        Map<String, Object> paramsMap = entity.getParams();
+        if (paramsMap != null && !paramsMap.isEmpty()) {
+            List<KeyValue> transformedList = paramsMap.entrySet().stream()
+                    .map(entry -> new KeyValue(entry.getKey(), String.valueOf(entry.getValue())))
+                    .toList();
+            formData.setParams(transformedList);
+        }
+        return formData;
+    }
+
+    /**
+     * 删除菜单
+     *
+     * @param id 菜单ID
+     * @return 是否删除成功
+     */
+    @Override
+    @CacheEvict(cacheNames = "menu", key = "'routes'")
+    public boolean deleteMenu(Long id) {
+        // 删除前判断菜单类型，仅按钮菜单删除后刷新权限缓存
+        Menu menu = this.getById(id);
+        if (menu == null) return false;
+        boolean isButton = MenuTypeEnum.BUTTON.getValue().equals(menu.getType());
+
+        // 先取出菜单及子菜单ID，删除后按这批ID清理租户关联
+        List<Long> removedMenuIds = this.list(new LambdaQueryWrapper<Menu>()
+                        .select(Menu::getId)
+                        .eq(Menu::getId, id)
+                        .or()
+                        .apply("CONCAT(',',tree_path,',') LIKE CONCAT('%,',{0},',%')", id))
+                .stream()
+                .map(Menu::getId)
+                .toList();
+
+        boolean result = this.remove(new LambdaQueryWrapper<Menu>()
+                .eq(Menu::getId, id)
+                .or()
+                .apply("CONCAT (',',tree_path,',') LIKE CONCAT('%,',{0},',%')", id));
+
+        if (result) {
+            // 清理租户菜单关联（含级联删除的按钮）
+            tenantMenuService.removeByMenuIds(removedMenuIds);
+            // 仅按钮菜单删除后刷新权限缓存
+            if (isButton) {
+                roleMenuService.refreshRolePermsCache();
+            }
+        }
+        return result;
+
+    }
+
+    /**
+     * 代码生成时添加菜单
+     *
+     * @param parentMenuId 父菜单ID
+     * @param dto          创建菜单数据载体
+     */
+    @Override
+    public void addMenuForCodegen(Long parentMenuId, MenuCreateDTO dto) {
+        Menu parentMenu = this.getById(parentMenuId);
+        Assert.notNull(parentMenu, "上级菜单不存在");
+
+        long count = this.count(new LambdaQueryWrapper<Menu>().eq(Menu::getRouteName, dto.routeName()));
+        if (count > 0) {
+            return;
+        }
+
+        Menu menu = new Menu();
+        menu.setParentId(parentMenuId);
+        menu.setName(dto.name());
+        menu.setRouteName(dto.routeName());
+        menu.setRoutePath(StrUtil.toSymbolCase(dto.routeName(), '-'));
+        menu.setComponent(dto.moduleName() + "/" + StrUtil.toSymbolCase(dto.routeName(), '-') + "/index");
+        menu.setType(MenuTypeEnum.MENU.getValue());
+        menu.setSort(resolveNextSort(parentMenuId));
+        menu.setVisible(1);
+        // 与上级菜单同范围
+        menu.setScope(parentMenu.getScope());
+        boolean result = this.save(menu);
+
+        if (result) {
+            // 生成treePath
+            String treePath = generateMenuTreePath(parentMenuId);
+            menu.setTreePath(treePath);
+            this.updateById(menu);
+
+            // 业务菜单同步开放给所有租户
+            if (MenuScopeEnum.TENANT.getValue().equals(menu.getScope())) {
+                tenantMenuService.addMenuToAllTenants(menu.getId());
+            }
+
+            // 生成 CRUD 按钮权限
+            saveCrudButtons(menu.getId(), dto.moduleName() + ":" + dto.tableName().replace("_", "-"),
+                    treePath, menu.getScope());
+        }
+    }
+
+    //---------------------------------------------------
+    // AI 辅助：未开启 AI 时调用返回业务异常
+    //---------------------------------------------------
+
+    /**
+     * 用 AI 推断菜单的访问路径、权限标识与配套按钮
+     *
+     * @param form 菜单信息
+     * @return 推断结果
+     */
+    @Override
+    public MenuAiVO aiFillMenu(MenuAiFillForm form) {
+        return aiChatService.chatEntity(
+                promptLoader.get(SYSTEM_PROMPT_PATH), buildAiUserPrompt(form), MenuAiVO.class);
+    }
+
+    /**
+     * 构造用户提示词，附带同级菜单样本供模型沿用既有命名风格
+     *
+     * @param form 菜单信息
+     * @return 用户提示词
+     */
+    private String buildAiUserPrompt(MenuAiFillForm form) {
+        StringBuilder text = new StringBuilder();
+        text.append("菜单名称：").append(form.getName()).append("\n");
+        text.append("菜单类型：").append(menuTypeLabel(form.getType())).append("\n");
+
+        Long parentId = form.getParentId() == null ? SystemConstants.ROOT_NODE_ID : form.getParentId();
+        Menu parent = this.getById(parentId);
+        text.append("上级菜单：").append(parent == null ? "顶级" : parent.getName()).append("\n");
+
+        List<Menu> siblings = this.list(new LambdaQueryWrapper<Menu>()
+                .eq(Menu::getParentId, parentId)
+                .orderByAsc(Menu::getSort)
+                .last("LIMIT 10")
+        );
+        text.append("同级菜单示例：\n");
+        if (CollectionUtil.isEmpty(siblings)) {
+            text.append("（无）\n");
+        } else {
+            // 示例路径只展示当前这一级的路径片段
+            siblings.forEach(menu -> text.append("- ")
+                    .append(menu.getName())
+                    .append("（类型 ").append(menuTypeLabel(menu.getType()))
+                    .append("，路径片段 ").append(StrUtil.blankToDefault(StrUtil.removePrefix(menu.getRoutePath(), "/"), "无"))
+                    .append("，权限 ").append(StrUtil.blankToDefault(menu.getPerm(), "无"))
+                    .append("）\n"));
+        }
+        return text.toString();
+    }
+
+    /**
+     * 菜单类型取中文名称，枚举无匹配时沿用原值
+     *
+     * @param type 菜单类型
+     * @return 中文名称
+     */
+    private String menuTypeLabel(String type) {
+        if (StrUtil.isBlank(type)) {
+            return "未指定";
+        }
+        MenuTypeEnum menuType = IBaseEnum.getEnumByValue(type, MenuTypeEnum.class);
+        return menuType == null ? type : menuType.getLabel();
+    }
+
+}

@@ -1,0 +1,122 @@
+package com.youlai.boot.config;
+
+import cn.binarywang.wx.miniapp.api.WxMaService;
+import cn.hutool.core.util.ArrayUtil;
+import com.youlai.boot.auth.password.service.CaptchaService;
+import com.youlai.boot.framework.security.config.SecurityProperties;
+import com.youlai.boot.framework.security.filter.TokenAuthenticationFilter;
+import com.youlai.boot.framework.security.port.UserAuthenticationPort;
+import com.youlai.boot.framework.security.service.SecurityUserDetailsService;
+import com.youlai.boot.framework.security.token.TokenManager;
+import com.youlai.boot.auth.password.filter.CaptchaValidationFilter;
+import com.youlai.boot.framework.security.handler.JsonAccessDeniedHandler;
+import com.youlai.boot.framework.security.handler.JsonAuthenticationEntryPoint;
+import com.youlai.boot.auth.sms.provider.SmsAuthenticationProvider;
+import com.youlai.boot.auth.wxma.provider.WxMaAuthenticationProvider;
+import com.youlai.boot.system.service.UserSocialService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.ProviderManager;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.config.annotation.web.configurers.HeadersConfigurer;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
+
+import jakarta.servlet.DispatcherType;
+
+/**
+ * Spring Security 配置类。
+ *
+ * @author Ray.Hao
+ * @since 4.3.1
+ */
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity
+@RequiredArgsConstructor
+public class SecurityConfig {
+
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final PasswordEncoder passwordEncoder;
+    private final TokenManager tokenManager;
+    private final SecurityUserDetailsService userDetailsService;
+    private final CaptchaService captchaService;
+    private final SecurityProperties securityProperties;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        return http
+                .authorizeHttpRequests(requestMatcherRegistry -> {
+                            requestMatcherRegistry.dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll();
+                            String[] permitAllUrls = securityProperties.getPermitAllUrls();
+                            if (ArrayUtil.isNotEmpty(permitAllUrls)) {
+                                requestMatcherRegistry.requestMatchers(permitAllUrls).permitAll();
+                            }
+                            requestMatcherRegistry.requestMatchers(HttpMethod.GET,
+                                    "/api/v1/public/marketing/spaces",
+                                    "/api/v1/public/marketing/spaces/*").permitAll();
+                            requestMatcherRegistry.anyRequest().authenticated();
+                        }
+                )
+                .exceptionHandling(configurer ->
+                        configurer
+                                .authenticationEntryPoint(new JsonAuthenticationEntryPoint())
+                                .accessDeniedHandler(new JsonAccessDeniedHandler())
+                )
+                .sessionManagement(configurer ->
+                        configurer.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                )
+                .csrf(AbstractHttpConfigurer::disable)
+                .formLogin(AbstractHttpConfigurer::disable)
+                .httpBasic(AbstractHttpConfigurer::disable)
+                .headers(headers -> headers.frameOptions(HeadersConfigurer.FrameOptionsConfig::disable))
+                .addFilterBefore(new CaptchaValidationFilter(captchaService), UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(new TokenAuthenticationFilter(tokenManager), AuthorizationFilter.class)
+                .build();
+    }
+
+    @Bean
+    public DaoAuthenticationProvider daoAuthenticationProvider() {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(userDetailsService);
+        provider.setPasswordEncoder(passwordEncoder);
+        return provider;
+    }
+
+    @Bean
+    public SmsAuthenticationProvider smsAuthenticationProvider(UserAuthenticationPort userAuthPort) {
+        return new SmsAuthenticationProvider(userAuthPort, redisTemplate);
+    }
+
+    @Bean
+    public WxMaAuthenticationProvider wechatMiniAuthenticationProvider(
+            WxMaService wxMaService,
+            UserAuthenticationPort userAuthenticationPort,
+            UserSocialService userSocialService
+    ) {
+        return new WxMaAuthenticationProvider(wxMaService, userAuthenticationPort, userSocialService);
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(
+            DaoAuthenticationProvider daoAuthenticationProvider,
+            SmsAuthenticationProvider smsAuthenticationProvider,
+            WxMaAuthenticationProvider wxMaAuthenticationProvider
+    ) {
+        return new ProviderManager(
+                daoAuthenticationProvider,
+                smsAuthenticationProvider,
+                wxMaAuthenticationProvider
+        );
+    }
+}
